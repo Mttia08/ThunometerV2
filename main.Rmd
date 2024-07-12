@@ -1,0 +1,149 @@
+# Load the required libraries
+```{r}
+source("load_packages.R")
+packages <- c("jsonlite", "leaflet", "osmdata", "sf", 'tidyverse', 'influxdbclient', 'doParallel', 'Metrics')
+load_packages(packages)
+```
+
+# Download the data
+```{r}
+source("get_data.R")
+source("read_biel.R")
+result_with_biel <- bind_rows(result, data_biel)
+```
+
+# Load the models
+```{r}
+source("models.R")
+```
+
+# Import and clean the training data for the model
+```{r}
+source("data_cleaning.R")
+```
+
+# Preprocess the data for the models
+```{r}
+predictors <- colnames(combined)
+
+formula_local <- as.formula(paste("temperature", '~', paste(predictors, collapse = "+")))
+
+pp <- recipes::recipe(formula_local, data = combined) |>
+  recipes::step_YeoJohnson(recipes::all_numeric(), -recipes::all_outcomes()) |>
+  recipes::step_center(recipes::all_numeric(), recipes::all_outcomes()) |>
+  recipes::step_scale(recipes::all_numeric(), recipes::all_outcomes())
+```
+
+# Split the data into train and test data
+```{r}
+split_data <- train_test_split(combined, seed = 123)
+train_data <- split_data$train
+test_data <- split_data$test
+```
+
+# Train the models
+```{r, eval=FALSE}
+mod_lm <- linear_regression(pp, train_data)
+
+mod_knn <- knn(pp, train_data)
+
+mod_rf = random_forest(pp, train_data)
+```
+
+# Test the models using the test_data
+```{r, eval=FALSE}
+y <- test_data$temperature
+
+y_pred <- predict(mod_lm, test_data)
+metrics <- tibble(Model = "LM", RMSE = rmse(y, y_pred), MAE = mae(y, y_pred), R2 = cor(y, y_pred) ^ 2)
+
+y_pred <- predict(mod_knn, test_data)
+metrics |>
+  add_row(Model = "KNN", RMSE = rmse(y, y_pred), MAE = mae(y, y_pred), R2 = cor(y, y_pred) ^ 2)
+
+y_pred <- predict(mod_rf, test_data)
+metrics |>
+  add_row(Model = "KNN", RMSE = rmse(y, y_pred), MAE = mae(y, y_pred), R2 = cor(y, y_pred) ^ 2)
+
+```
+
+# Extract last temperature value from results
+```{r}
+latest_temperatures <- result %>%
+  group_by(Log_NR) %>%
+  summarise(Last_Temperature = round(last(temperature), digits = 2)) |>
+  arrange(Log_NR)
+```
+
+# Show measurements on a map
+```{r}
+offline_stations <- c()
+
+meta_1 <- as.tibble(read_delim('Messnetz_Thun_Steffisburg_Uebersicht.csv', delim = ';'))
+meta_1 <- subset(meta_1, select = -c(Nr_Strassenlaterne, LCZ))
+meta_1$Log_NR <- as.numeric(meta_1$Log_NR)
+
+meta_2 <- as.tibble(read_delim('MetadatenBern.csv', delim = ','))
+meta_2 <- rename(meta_2, NORD_CHTOPO = Latitude)
+meta_2 <- rename(meta_2, OST_CHTOPO = Longitude)
+meta_2 <- subset(meta_2, select = -c(STANDORT_NEU, Doppel_Messnetz_23, New))
+meta_2$Log_NR <- as.numeric(meta_2$Log_NR)
+
+# meta_3 <- as.tibble(read_delim('Metadaten_Biel.csv', delim = ','))
+# meta_3$Log_NR <- as.numeric(meta_3$Log_NR)
+# meta_2 <- bind_rows(meta_2, meta_3)
+
+meta <- bind_rows(meta_1, meta_2)
+
+for (log_nr in meta$Log_NR)
+  if (!(log_nr %in% result$Log_NR) && !(log_nr %in% offline_stations))
+    offline_stations <- c(offline_stations, log_nr)
+
+offline_meta <- meta %>%
+  filter(Log_NR %in% offline_stations) |>
+  arrange(Log_NR)
+online_meta <- meta %>%
+  filter(!(Log_NR %in% offline_stations)) |>
+  arrange(Log_NR)
+
+
+bbox <- list(min_lon = 7.583333, min_lat = 46.716667, max_lon = 7.65, max_lat = 46.766667)
+
+pal <- colorNumeric(palette = c("blue", "lightblue", "white", "orange", "red"), domain = latest_temperatures$Last_Temperature)
+
+leaflet() |>
+  addTiles() |>
+  fitBounds(lng1 = bbox$min_lon, lat1 = bbox$min_lat, lng2 = bbox$max_lon, lat2 = bbox$max_lat) |>
+  addCircleMarkers(
+    data = online_meta,
+    ~OST_CHTOPO, ~NORD_CHTOPO,
+    label = ~paste(latest_temperatures$Last_Temperature, "°C"),
+    radius = 6,
+    color = "black",
+    fillColor = ~pal(latest_temperatures$Last_Temperature),
+    fill = TRUE,
+    stroke = TRUE,
+    fillOpacity = 1,
+    weight = 2) |>
+  addLegend(
+    pal = pal, 
+    values = latest_temperatures$Last_Temperature, 
+    opacity = 0.7, 
+    title = "Temperatur (°C)",
+    position = "topright") |>
+  addCircleMarkers(
+    data = offline_meta,
+    ~OST_CHTOPO, ~NORD_CHTOPO,
+    label = ~Log_NR,
+    radius = 4,
+    color = "black",
+    fill = TRUE,
+    stroke = TRUE,
+    fillOpacity = 1,
+    weight = 2)
+```
+
+
+
+
+
